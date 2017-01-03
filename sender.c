@@ -87,12 +87,6 @@ _parse_cmdline (int *argc, char **argv, options_st * options)
   GOptionContext *context;
   GOptionGroup *gstreamer_group;
 
-  /* We must initialise the threading system before using any
-     other Glib function, such as g_option_context_new() ??? */
-  if (!g_thread_supported ()) {
-    g_thread_init (NULL);
-  }
-
   context = g_option_context_new ("- Send video streaming over RTP");
 
   //Init gstreamer
@@ -114,7 +108,7 @@ _parse_cmdline (int *argc, char **argv, options_st * options)
 }
 
 // TODO: should return state
-void
+static void
 create_and_link_rtpbin (tstRtpBin * pRtpBin, GstElement * pipe,
     GstElement * src, gint port, gchar * ip)
 {
@@ -165,20 +159,17 @@ create_and_link_rtpbin (tstRtpBin * pRtpBin, GstElement * pipe,
   g_object_set (pRtpBin->rtcpsrc, "port", port + 5, NULL);
 }
 
-GstElement *
+static GstElement *
 create_video_stream (tstVideoStream * stream, gint nodmabuf,
     gint port, gchar * ip)
 {
   GstPad *pad = NULL;
   gboolean status;
-  gchar *format;
-
 
   if (!stream) {
     g_printerr ("VideoStream: invalid stream object.\n");
     return NULL;
   }
-
 
   stream->payload = gst_element_factory_make ("rtph264pay", "rtph264pay0");
   stream->encoder =
@@ -196,8 +187,6 @@ create_video_stream (tstVideoStream * stream, gint nodmabuf,
     g_object_set (G_OBJECT (stream->encoder), "output-io-mode", 5, NULL);       // set io-mode to dmabuf-import
     //g_object_set(G_OBJECT(stream->encoder), "tune", 4, NULL);  //Set tune to zerolatency
   }
-  format = "I420\0";
-
 
   GstCaps *caps_enc = gst_caps_new_simple ("video/x-h264",
       "stream-format", G_TYPE_STRING, "byte-stream",
@@ -242,7 +231,7 @@ create_video_stream (tstVideoStream * stream, gint nodmabuf,
   return stream->bin;
 }
 
-void
+static void
 destroy_video_stream (tstVideoStream * stream)
 {
   if (stream != NULL && stream->bin != NULL) {
