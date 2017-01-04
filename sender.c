@@ -89,15 +89,11 @@ _parse_cmdline (int *argc, char **argv, options_st * options)
 
   context = g_option_context_new ("- Send video streaming over RTP");
 
-  //Init gstreamer
   gstreamer_group = gst_init_get_option_group ();       // This is a way to chain gst_init with other
-  // _init() functions
 
-  // We add our options and the gstreamer specific ones
   g_option_context_add_main_entries (context, entries, NULL);
   g_option_context_add_group (context, gstreamer_group);
 
-  //Parse context
   g_option_context_parse (context, argc, &argv, &gerror);
   if (gerror != NULL) {
     g_printerr ("Error initialising: %s\n", gerror->message);
@@ -107,7 +103,6 @@ _parse_cmdline (int *argc, char **argv, options_st * options)
   g_option_context_free (context);
 }
 
-// TODO: should return state
 static void
 create_and_link_rtpbin (tstRtpBin * pRtpBin, GstElement * pipe,
     GstElement * src, gint port, gchar * ip)
@@ -122,7 +117,6 @@ create_and_link_rtpbin (tstRtpBin * pRtpBin, GstElement * pipe,
   gst_bin_add_many (GST_BIN (pipe), pRtpBin->rtpbin, pRtpBin->rtpsink,
       pRtpBin->rtcpsink, pRtpBin->rtcpsrc, NULL);
 
-  // RTP
   srcpad = gst_element_get_static_pad (src, "src");
   pRtpBin->rtp_sinkpad =
       gst_element_get_request_pad (pRtpBin->rtpbin, "send_rtp_sink_0");
@@ -137,7 +131,6 @@ create_and_link_rtpbin (tstRtpBin * pRtpBin, GstElement * pipe,
   gst_object_unref (srcpad);
   gst_object_unref (sinkpad);
 
-  // RTCP
   pRtpBin->rtcp_srcpad =
       gst_element_get_request_pad (pRtpBin->rtpbin, "send_rtcp_src_0");
   sinkpad = gst_element_get_static_pad (pRtpBin->rtcpsink, "sink");
@@ -152,7 +145,6 @@ create_and_link_rtpbin (tstRtpBin * pRtpBin, GstElement * pipe,
     g_error ("Failed to link rtcpsrc to rtpbin");
   gst_object_unref (srcpad);
 
-  // Set properties to rtpbin
   g_object_set (G_OBJECT (pRtpBin->rtpsink), "port", port, "host", ip, NULL);
   g_object_set (pRtpBin->rtcpsink, "port", port + 1, "host", ip, NULL);
   g_object_set (pRtpBin->rtcpsink, "async", FALSE, "sync", FALSE, NULL);
@@ -185,7 +177,6 @@ create_video_stream (tstVideoStream * stream, gint nodmabuf,
 
   if (nodmabuf == FALSE) {
     g_object_set (G_OBJECT (stream->encoder), "output-io-mode", 5, NULL);       // set io-mode to dmabuf-import
-    //g_object_set(G_OBJECT(stream->encoder), "tune", 4, NULL);  //Set tune to zerolatency
   }
 
   GstCaps *caps_enc = gst_caps_new_simple ("video/x-h264",
@@ -215,7 +206,6 @@ create_video_stream (tstVideoStream * stream, gint nodmabuf,
     gst_object_unref (stream->bin);
     return NULL;
   }
-  // TODO: correctly check return..
   create_and_link_rtpbin (&stream->stRtpBin, stream->bin, stream->payload,
       port, ip);
 
@@ -242,7 +232,6 @@ destroy_video_stream (tstVideoStream * stream)
         stream->encoder_caps_filter, stream->parser, stream->payload, NULL);
 
     PRINT_REFCOUNT (stream->bin);
-    /* destroy bin container */
     gst_object_unref (GST_OBJECT (stream->bin));
   }
 }
@@ -259,30 +248,23 @@ main (int argc, char *argv[])
   gboolean status;
   int cnt;
 
-  //Initialisation gstream and argument list check
   _parse_cmdline (&argc, argv, &options);
 
-  // There should only remain the file name
   if (argc != 1) {
     g_printerr ("Extra unknown arguments present.  See --help\n");
     exit (-1);
   }
 
-  /* Create the VideoDevice */
   source = gst_element_factory_make ("v4l2src", "source0");
-  // remove floating reference as this should element stay even after being removed from bin
   REMOVE_FLOATING_REF (source);
   if (options.no_dma_buf == FALSE) {
     g_print ("Using DMABUF\n");
-    g_object_set (G_OBJECT (source), "io-mode", 4, NULL);       // set io-mode to dmabuf
+    g_object_set (G_OBJECT (source), "io-mode", 4, NULL);
   } else {
     g_print ("Not using DMABUF\n");
   }
-  // Capsfilter
   source_caps_filter = gst_element_factory_make ("capsfilter", "source_caps");
-  // remove floating reference as this should element stay even after being removed from bin
   REMOVE_FLOATING_REF (source_caps_filter);
-  // Create caps
   GstCaps *caps_src = gst_caps_new_simple ("video/x-raw",
       "framerate", GST_TYPE_FRACTION, 30, 1,
       "format", G_TYPE_STRING, "I420",
@@ -293,17 +275,13 @@ main (int argc, char *argv[])
     g_printerr ("Caps for Source could not be created.\n");
     return -1;
   }
-  // Set caps on cap filter
   g_object_set (G_OBJECT (source_caps_filter), "caps", caps_src, NULL);
 
-  /* Create VideoStream and connect it with VideoDevice several times */
   for (cnt = 0; cnt < 10; cnt++) {
     g_print ("Build pipeline (iteration %d)\n", cnt);
 
-    /* Build the pipeline */
     pipeline = gst_pipeline_new ("test-pipeline");
 
-    // add VideoDevice
     gst_bin_add_many (GST_BIN (pipeline), source, source_caps_filter, NULL);
     status = gst_element_link (source, source_caps_filter);
     if (status != TRUE) {
@@ -311,7 +289,6 @@ main (int argc, char *argv[])
       gst_object_unref (pipeline);
       return -1;
     }
-    // add VideoStream
     stream = create_video_stream (&stVideoStream, options.no_dma_buf,
         options.video_rtp_port, options.sender_host);
     if (stream == NULL) {
@@ -327,7 +304,6 @@ main (int argc, char *argv[])
       gst_object_unref (pipeline);
       return -1;
     }
-    /* Start playing */
     g_print ("Start playing pipeline (iteration %d)\n", cnt);
     ret = gst_element_set_state (pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE) {
@@ -338,7 +314,6 @@ main (int argc, char *argv[])
 
     sleep (4);
 
-    /* stop playing, remove elements/destroy stream */
     g_print ("Stop playing pipeline (iteration %d)\n", cnt);
     gst_element_set_state (pipeline, GST_STATE_NULL);
 
