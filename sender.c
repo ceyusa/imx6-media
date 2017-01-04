@@ -172,9 +172,8 @@ create_video_stream (tstVideoStream * stream, gint nodmabuf,
     return NULL;
   }
 
-  if (nodmabuf == FALSE) {
-    g_object_set (G_OBJECT (stream->encoder), "output-io-mode", 5, NULL);       // set io-mode to dmabuf-import
-  }
+  if (!nodmabuf)
+    g_object_set (G_OBJECT (stream->encoder), "output-io-mode", 5, NULL);
 
   GstCaps *caps_enc = gst_caps_new_simple ("video/x-h264",
       "stream-format", G_TYPE_STRING, "byte-stream",
@@ -196,9 +195,7 @@ create_video_stream (tstVideoStream * stream, gint nodmabuf,
       stream->encoder_caps_filter, stream->parser, stream->payload, NULL);
   status = gst_element_link_many (stream->encoder, stream->encoder_caps_filter,
       stream->parser, stream->payload, NULL);
-
-
-  if (status != TRUE) {
+  if (!status) {
     g_printerr ("VideoStream: elements could not be linked.\n");
     gst_object_unref (stream->bin);
     return NULL;
@@ -221,7 +218,7 @@ create_video_stream (tstVideoStream * stream, gint nodmabuf,
 static void
 destroy_video_stream (tstVideoStream * stream)
 {
-  if (stream != NULL && stream->bin != NULL) {
+  if (stream && stream->bin) {
     PRINT_REFCOUNT (stream->bin);
     PRINT_REFCOUNT (stream->encoder);
     gst_bin_remove_many (GST_BIN (stream->bin),
@@ -255,7 +252,7 @@ main (int argc, char *argv[])
 
   source = gst_element_factory_make ("v4l2src", "source0");
   REMOVE_FLOATING_REF (source);
-  if (options.no_dma_buf == FALSE) {
+  if (!options.no_dma_buf) {
     g_print ("Using DMABUF\n");
     g_object_set (G_OBJECT (source), "io-mode", 4, NULL);
   } else {
@@ -282,14 +279,14 @@ main (int argc, char *argv[])
 
     gst_bin_add_many (GST_BIN (pipeline), source, source_caps_filter, NULL);
     status = gst_element_link (source, source_caps_filter);
-    if (status != TRUE) {
+    if (!status) {
       g_printerr ("VideoDevice could not be linked.\n");
       gst_object_unref (pipeline);
       return -1;
     }
     stream = create_video_stream (&stVideoStream, options.no_dma_buf,
         options.video_rtp_port, options.sender_host);
-    if (stream == NULL) {
+    if (!stream) {
       g_printerr ("VideoStream could not be created.\n");
       gst_object_unref (pipeline);
       return -1;
@@ -297,7 +294,7 @@ main (int argc, char *argv[])
     gst_bin_add (GST_BIN (pipeline), stream);
 
     status = gst_element_link (source_caps_filter, stream);
-    if (status != TRUE) {
+    if (!status) {
       g_printerr ("VideoDevice could not be linked with VideoStream.\n");
       gst_object_unref (pipeline);
       return -1;
