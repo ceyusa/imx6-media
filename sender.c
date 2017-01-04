@@ -25,19 +25,21 @@ static struct options_st
 
 typedef struct {
   GMainLoop *loop;
-  GstElement *pipeline;
+  GstElement *pipeline, *rtpbin;
   gboolean halt;
+  guint stats_id;
 } App;
-
-static guint stats_id = 0;
 
 /* this function is called every second and dumps the RTP manager stats */
 static gboolean
-print_stats (GstElement * rtpbin)
+print_stats (gpointer data)
 {
+  GstElement *rtpbin;
   GObject *session;
   GstStructure *stats;
   gchar *str;
+
+  rtpbin = data;
 
   /* get session 0 */
   g_signal_emit_by_name (rtpbin, "get-internal-session", 0, &session);
@@ -143,6 +145,8 @@ handle_messages (GstBus * bus, GstMessage * message, gpointer data)
       if (GST_MESSAGE_SRC (message) == GST_OBJECT (app->pipeline)) {
         g_print ("%s\n", gst_element_state_get_name (new_state));
         if (new_state == GST_STATE_PLAYING) {
+          /* print stats every second */
+          app->stats_id = g_timeout_add_seconds (1, print_stats, app->rtpbin);
           g_timeout_add_seconds (4, stop, data);
         }
       }
@@ -167,7 +171,7 @@ handle_messages (GstBus * bus, GstMessage * message, gpointer data)
  *        udpsrc port=10002 ! rtpbin.recv_rtcp_sink_0
  */
 static GstElement *
-create_pipeline (struct options_st * options)
+create_pipeline (App * app, struct options_st * options)
 {
   GstElement *pipeline, *rtpbin, *source, *srccapsfilter, *payloader, *encoder,
     *capsfilter, *parser, *rtpsink, *rtcpsink, *rtcpsrc;
@@ -266,8 +270,8 @@ create_pipeline (struct options_st * options)
   gst_object_unref (srcpad);
   gst_object_unref (sinkpad);
 
-  /* print stats every second */
-  stats_id = g_timeout_add_seconds (1, (GSourceFunc) print_stats, rtpbin);
+  app->pipeline = pipeline;
+  app->rtpbin = rtpbin;
 
   return pipeline;
 }
@@ -283,11 +287,6 @@ main (int argc, char *argv[])
   if (!parse_cmdline (&argc, argv, &options))
     return 1;
 
-  if (argc != 1) {
-    g_printerr ("Extra unknown arguments present.  See --help\n");
-    exit (-1);
-  }
-
   app.halt = FALSE;
   for (cnt = 0; cnt < 10; cnt++) {
     g_print ("Build pipeline (iteration %d)\n", cnt);
@@ -296,19 +295,19 @@ main (int argc, char *argv[])
     app.loop = g_main_loop_new (NULL, FALSE);
 
     /* build pipeline */
-    app.pipeline = create_pipeline (&options);
+    app.pipeline = create_pipeline (&app, &options);
     bus = gst_element_get_bus (app.pipeline);
     gst_bus_add_watch (bus, handle_messages, &app);
     gst_object_unref (bus);
 
     gst_element_set_state (app.pipeline, GST_STATE_PLAYING);
-
     g_main_loop_run (app.loop);
-
     gst_element_set_state (app.pipeline, GST_STATE_NULL);
 
-    if (stats_id != 0)
-      g_source_remove (stats_id);
+    if (app.stats_id != 0) {
+      g_source_remove (app.stats_id);
+      app.stats_id = 0;
+    }
     gst_object_unref (app.pipeline);
     g_main_loop_unref (app.loop);
 
