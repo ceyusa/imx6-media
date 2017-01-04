@@ -58,9 +58,8 @@ static options_st options = {
   FALSE
 };
 
-
-static void
-_parse_cmdline (int *argc, char **argv, options_st * options)
+static gboolean
+parse_cmdline (int *argc, char **argv, options_st * options)
 {
   GOptionEntry entries[] = {
     {"sender-host", 0, 0, G_OPTION_ARG_STRING, &options->sender_host,
@@ -83,24 +82,22 @@ _parse_cmdline (int *argc, char **argv, options_st * options)
     {NULL}
   };
 
+  gboolean ret = TRUE;
   GError *gerror = NULL;
   GOptionContext *context;
-  GOptionGroup *gstreamer_group;
 
   context = g_option_context_new ("- Send video streaming over RTP");
-
-  gstreamer_group = gst_init_get_option_group ();       // This is a way to chain gst_init with other
-
   g_option_context_add_main_entries (context, entries, NULL);
-  g_option_context_add_group (context, gstreamer_group);
+  g_option_context_add_group (context, gst_init_get_option_group ());
 
-  g_option_context_parse (context, argc, &argv, &gerror);
-  if (gerror != NULL) {
+  ret = g_option_context_parse (context, argc, &argv, &gerror);
+  if (gerror) {
     g_printerr ("Error initialising: %s\n", gerror->message);
     g_error_free (gerror);
-    exit (-1);
   }
   g_option_context_free (context);
+
+  return ret;
 }
 
 static void
@@ -248,7 +245,8 @@ main (int argc, char *argv[])
   gboolean status;
   int cnt;
 
-  _parse_cmdline (&argc, argv, &options);
+  if (!parse_cmdline (&argc, argv, &options))
+    return 1;
 
   if (argc != 1) {
     g_printerr ("Extra unknown arguments present.  See --help\n");
