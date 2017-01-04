@@ -18,38 +18,6 @@ typedef struct _options_st
 
 } options_st;
 
-typedef struct
-{
-  GstPad *rtp_sinkpad;
-  GstPad *rtcp_srcpad;
-  GstPad *rtcp_sinkpad;
-  GstElement *rtpbin;
-  GstElement *rtcpsink;
-  GstElement *rtcpsrc;
-  GstElement *rtpsink;
-} tstRtpBin;
-
-typedef struct
-{
-  GstElement *encoder;
-  GstElement *encoder_caps_filter;
-  GstElement *parser;
-  GstElement *payload;
-  GstElement *bin;
-  GstPad *ghost_pad;
-  tstRtpBin stRtpBin;
-} tstVideoStream;
-
-#define PRINT_REFCOUNT(element) g_print("%s: refcount of element %s: %d\n", \
-                                __func__, \
-                                GST_OBJECT_NAME(element), \
-                                GST_OBJECT_REFCOUNT_VALUE(element))
-
-#define REMOVE_FLOATING_REF(element) if (g_object_is_floating(G_OBJECT(element))) \
-                                     { \
-                                       gst_object_ref_sink(GST_OBJECT(element)); \
-                                     }
-
 static options_st options = {
   "127.0.0.1",
   9997,
@@ -57,6 +25,56 @@ static options_st options = {
   240,
   FALSE
 };
+
+/* print the stats of a source */
+static void
+print_source_stats (GObject * source)
+{
+  GstStructure *stats;
+  gchar *str;
+
+  /* get the source stats */
+  g_object_get (source, "stats", &stats, NULL);
+
+  /* simply dump the stats structure */
+  str = gst_structure_to_string (stats);
+  g_print ("source stats: %s\n", str);
+
+  gst_structure_free (stats);
+  g_free (str);
+}
+
+/* this function is called every second and dumps the RTP manager stats */
+static gboolean
+print_stats (GstElement * rtpbin)
+{
+  GObject *session;
+  GValueArray *arr;
+  GValue *val;
+  guint i;
+
+  g_print ("***********************************\n");
+
+  /* get session 0 */
+  g_signal_emit_by_name (rtpbin, "get-internal-session", 0, &session);
+
+  /* print all the sources in the session, this includes the internal source */
+  g_object_get (session, "sources", &arr, NULL);
+
+  for (i = 0; i < arr->n_values; i++) {
+    GObject *source;
+
+    val = g_value_array_get_nth (arr, i);
+    source = g_value_get_object (val);
+
+    print_source_stats (source);
+  }
+  g_value_array_free (arr);
+
+  g_object_unref (session);
+
+  return TRUE;
+}
 
 static gboolean
 parse_cmdline (int *argc, char **argv, options_st * options)
@@ -100,146 +118,120 @@ parse_cmdline (int *argc, char **argv, options_st * options)
   return ret;
 }
 
-static void
-create_and_link_rtpbin (tstRtpBin * pRtpBin, GstElement * pipe,
-    GstElement * src, gint port, gchar * ip)
-{
-  GstPad *srcpad;
-  GstPad *sinkpad;
-
-  pRtpBin->rtpbin = gst_element_factory_make ("rtpbin", "rtpbin");
-  pRtpBin->rtpsink = gst_element_factory_make ("udpsink", "udpsink0");
-  pRtpBin->rtcpsink = gst_element_factory_make ("udpsink", "rtcpsink0");
-  pRtpBin->rtcpsrc = gst_element_factory_make ("udpsrc", "rtcpsrc0");
-  gst_bin_add_many (GST_BIN (pipe), pRtpBin->rtpbin, pRtpBin->rtpsink,
-      pRtpBin->rtcpsink, pRtpBin->rtcpsrc, NULL);
-
-  srcpad = gst_element_get_static_pad (src, "src");
-  pRtpBin->rtp_sinkpad =
-      gst_element_get_request_pad (pRtpBin->rtpbin, "send_rtp_sink_0");
-  if (gst_pad_link (srcpad, pRtpBin->rtp_sinkpad) != GST_PAD_LINK_OK)
-    g_error ("Failed to link audio payloader to rtpbin");
-  gst_object_unref (srcpad);
-
-  srcpad = gst_element_get_static_pad (pRtpBin->rtpbin, "send_rtp_src_0");
-  sinkpad = gst_element_get_static_pad (pRtpBin->rtpsink, "sink");
-  if (gst_pad_link (srcpad, sinkpad) != GST_PAD_LINK_OK)
-    g_error ("Failed to link rtpbin to rtpsink");
-  gst_object_unref (srcpad);
-  gst_object_unref (sinkpad);
-
-  pRtpBin->rtcp_srcpad =
-      gst_element_get_request_pad (pRtpBin->rtpbin, "send_rtcp_src_0");
-  sinkpad = gst_element_get_static_pad (pRtpBin->rtcpsink, "sink");
-  if (gst_pad_link (pRtpBin->rtcp_srcpad, sinkpad) != GST_PAD_LINK_OK)
-    g_error ("Failed to link rtpbin to rtcpsink");
-  gst_object_unref (sinkpad);
-
-  srcpad = gst_element_get_static_pad (pRtpBin->rtcpsrc, "src");
-  pRtpBin->rtcp_sinkpad =
-      gst_element_get_request_pad (pRtpBin->rtpbin, "recv_rtcp_sink_0");
-  if (gst_pad_link (srcpad, pRtpBin->rtcp_sinkpad) != GST_PAD_LINK_OK)
-    g_error ("Failed to link rtcpsrc to rtpbin");
-  gst_object_unref (srcpad);
-
-  g_object_set (G_OBJECT (pRtpBin->rtpsink), "port", port, "host", ip, NULL);
-  g_object_set (pRtpBin->rtcpsink, "port", port + 1, "host", ip, NULL);
-  g_object_set (pRtpBin->rtcpsink, "async", FALSE, "sync", FALSE, NULL);
-  g_object_set (pRtpBin->rtcpsrc, "port", port + 5, NULL);
-}
-
+/* build a pipeline equivalent to:
+ *
+ * gst-launch-1.0 -v rtpbin \
+ *    v4l2src io-mode=dmabuf ! video/x-raw, width=320, height=240, format=I420 ! \
+ *               v4l2video2h264enc output-io-mode=dmabuf-import ! \
+ *               video/x-h264, stream-format=byte-stream, aligment=au, profile=constrained-baseline ! \
+ *               h264parse ! rtph264pay ! rtpbin.send_rtp_sink_0               \
+ *           rtpbin.send_rtp_src_0 ! udpsink port=9997 host=127.0.0.1          \
+ *           rtpbin.send_rtcp_src_0 ! udpsink port=9998 host=127.0.0.1 sync=false async=false \
+ *        udpsrc port=10002 ! rtpbin.recv_rtcp_sink_0
+ */
 static GstElement *
-create_video_stream (tstVideoStream * stream, gint nodmabuf,
-    gint port, gchar * ip)
+create_pipeline (options_st * options)
 {
-  GstPad *pad = NULL;
-  gboolean status;
+  GstElement *pipeline, *rtpbin, *source, *srccapsfilter, *payloader, *encoder,
+    *capsfilter, *parser, *rtpsink, *rtcpsink, *rtcpsrc;
+  GstCaps *caps;
+  GstPad *sinkpad, *srcpad;
 
-  if (!stream) {
-    g_printerr ("VideoStream: invalid stream object.\n");
-    return NULL;
-  }
+  pipeline = gst_pipeline_new (NULL);
 
-  stream->payload = gst_element_factory_make ("rtph264pay", "rtph264pay0");
-  stream->encoder =
-      gst_element_factory_make ("v4l2video2h264enc", "v4l2video2h264enc");
-  stream->parser = gst_element_factory_make ("h264parse", "h264parse0");
-  stream->encoder_caps_filter =
-      gst_element_factory_make ("capsfilter", "enc_caps");
-  if (!stream->payload || !stream->encoder || !stream->parser
-      || !stream->encoder_caps_filter) {
-    g_printerr ("VideoStream: can't create all elements.\n");
-    return NULL;
-  }
+  /* video source */
+  source = gst_element_factory_make ("v4l2src", NULL);
+  if (!options->no_dma_buf)
+    g_object_set (source, "io-mode", 4, NULL);
 
-  if (!nodmabuf)
-    g_object_set (G_OBJECT (stream->encoder), "output-io-mode", 5, NULL);
+  srcapsfilter = gst_element_factory_make ("capsfilter", NULL);
+  caps = gst_caps_new_simple ("video/x-raw",
+      "framerate", GST_TYPE_FRACTION, 30, 1,
+      "format", G_TYPE_STRING, "I420",
+      "width", G_TYPE_INT, options.width_video,
+      "height", G_TYPE_INT, options.height_video,
+      NULL);
+  g_object_set (srccapsfilter, "caps", caps, NULL);
 
-  GstCaps *caps_enc = gst_caps_new_simple ("video/x-h264",
+  encoder = gst_element_factory_make ("v4l2video2h264enc", NULL);
+  if (!options->no_dma_buf)
+    g_object_set (encoder, "output-io-mode", 5, NULL);
+
+  capsfilter = gst_element_factory_make ("capsfilter", NULL);
+  caps = gst_caps_new_simple ("video/x-h264",
       "stream-format", G_TYPE_STRING, "byte-stream",
       "alignment", G_TYPE_STRING, "au",
       "profile", G_TYPE_STRING, "constrained-baseline",
       NULL);
+  g_object_set (capsfilter, "caps", caps, NULL);
 
-  if (!caps_enc) {
-    g_printerr ("VideoStream: Caps for Encoder could not be created.\n");
-    return NULL;
+  parser = gst_element_factory_make ("h264parse", NULL);
+  payloader = gst_element_factory_make ("rtph264pay", NULL);
+
+  gst_bin_add_many (GST_BIN (pipeline), source, srccapsfilter, encoder,
+      capsfilter, parser, payloader, NULL);
+
+  if (!gst_element_link_many (source, srccapsfilter, encoder, capsfilter,
+           parser, payloader, NULL)) {
+    g_error ("Failed to link source, srccapsfilter, encoder, capsfilter, "
+        "parser and payloader");
   }
 
-  g_object_set (G_OBJECT (stream->encoder_caps_filter), "caps", caps_enc, NULL);
+  /* RTP */
+  rtpbin = gst_element_factory_make ("rtpbin", NULL);
+  gst_bin_add (GST_BIN (pipeline), rtpbin);
 
+  rtpsink = gst_element_factory_make ("udpsink", NULL);
+  g_object_set (rtpsink, "port", options->video_rtp_port,
+      "host", options->sender_host, NULL);
 
-  stream->bin = gst_bin_new ("VideoStream");
-  gst_bin_add_many (GST_BIN (stream->bin),
-      stream->encoder,
-      stream->encoder_caps_filter, stream->parser, stream->payload, NULL);
-  status = gst_element_link_many (stream->encoder, stream->encoder_caps_filter,
-      stream->parser, stream->payload, NULL);
-  if (!status) {
-    g_printerr ("VideoStream: elements could not be linked.\n");
-    gst_object_unref (stream->bin);
-    return NULL;
-  }
-  create_and_link_rtpbin (&stream->stRtpBin, stream->bin, stream->payload,
-      port, ip);
+  rtcpsink = gst_element_factory_make ("udpsink", NULL);
+  g_object_set (rtpsink, "port", options->video_rtp_port + 1,
+      "host", options->sender_host, "async", FALSE, "sync", FALSE, NULL);
 
-  pad = gst_element_get_static_pad (stream->encoder, "sink");
-  stream->ghost_pad = gst_ghost_pad_new ("sink", pad);
-  gst_pad_set_active (stream->ghost_pad, TRUE);
-  gst_element_add_pad (stream->bin, stream->ghost_pad);
-  gst_object_unref (GST_OBJECT (pad));
+  rtcpsrc = gst_element_factory_make ("udpsrc", NULL);
+  g_object_set (rtcpsrc, "port", options->video_rtp_port + 5, NULL);
 
-  REMOVE_FLOATING_REF (stream->bin);
-  PRINT_REFCOUNT (stream->encoder);
-  PRINT_REFCOUNT (stream->bin);
-  return stream->bin;
-}
+  gst_bin_add_many (GST_BIN (pipeline), rtpsink, rtcpsink, rtcpsrc, NULL);
 
-static void
-destroy_video_stream (tstVideoStream * stream)
-{
-  if (stream && stream->bin) {
-    PRINT_REFCOUNT (stream->bin);
-    PRINT_REFCOUNT (stream->encoder);
-    gst_bin_remove_many (GST_BIN (stream->bin),
-        stream->encoder,
-        stream->encoder_caps_filter, stream->parser, stream->payload, NULL);
+  /* now link all to the rtpbin, start by getting an RTP sinkpad for
+   * session 0 */
+  sinkpad = gst_element_get_request_pad (rtpbin, "send_rtp_sink_0");
+  srcpad = gst_element_get_static_pad (payloader, "src");
+  if (gst_pad_link (srcpad, sinkpad) != GST_PAD_LINK_OK)
+    g_error ("Failed to link payloader to rtpbin");
+  gst_object_unref (srcpad);
+  gst_object_unref (sinkpad);
 
-    PRINT_REFCOUNT (stream->bin);
-    gst_object_unref (GST_OBJECT (stream->bin));
-  }
+  /* get an RTCP srcpad for sending RTCP to the receiver */
+  srcpad = gst_element_get_static_pad (rtcpsrc, "src");
+  sinkpad = gst_element_get_request_pad (rtpbin, "recv_rtcp_sink_0");
+  if (gst_pad_link (srcpad, sinkpad) != GST_PAD_LINK_OK)
+    g_error ("Failed to link rtcpsrc to rtpbin");
+  gst_object_unref (srcpad);
+  gst_object_unref (sinkpad);
+
+  /* we also want to receive RTCP, request an RTCP sinkpad for session 0 and
+   * link it to the srcpad of the udpsrc for RTCP */
+  srcpad = gst_element_get_static_pad (rtcpsrc, "src");
+  sinkpad = gst_element_get_request_pad (rtpbin, "recv_rtcp_sink_0");
+  if (gst_pad_link (srcpad, sinkpad) != GST_PAD_LINK_OK)
+    g_error ("Failed to link rtcpsrc to rtpbin");
+  gst_object_unref (srcpad);
+  gst_object_unref (sinkpad);
+
+  /* print stats every second */
+  g_timeout_add_seconds (1, (GSourceFunc) print_stats, rtpbin);
+
+  return pipeline;
 }
 
 int
 main (int argc, char *argv[])
 {
-  GstElement *pipeline = NULL;
-  GstElement *source = NULL;
-  GstElement *source_caps_filter = NULL;
-  GstElement *stream = NULL;
-  tstVideoStream stVideoStream;
-  GstStateChangeReturn ret;
-  gboolean status;
+  GstElement *pipeline;
+  GstBus *bus;
+  GMainLoop *loop;
   int cnt;
 
   g_set_prgname ("sender");
@@ -251,79 +243,24 @@ main (int argc, char *argv[])
     exit (-1);
   }
 
-  source = gst_element_factory_make ("v4l2src", "source0");
-  REMOVE_FLOATING_REF (source);
-  if (!options.no_dma_buf) {
-    g_print ("Using DMABUF\n");
-    g_object_set (G_OBJECT (source), "io-mode", 4, NULL);
-  } else {
-    g_print ("Not using DMABUF\n");
-  }
-  source_caps_filter = gst_element_factory_make ("capsfilter", "source_caps");
-  REMOVE_FLOATING_REF (source_caps_filter);
-  GstCaps *caps_src = gst_caps_new_simple ("video/x-raw",
-      "framerate", GST_TYPE_FRACTION, 30, 1,
-      "format", G_TYPE_STRING, "I420",
-      "width", G_TYPE_INT, options.width_video,
-      "height", G_TYPE_INT, options.height_video,
-      NULL);
-  if (!caps_src) {
-    g_printerr ("Caps for Source could not be created.\n");
-    return -1;
-  }
-  g_object_set (G_OBJECT (source_caps_filter), "caps", caps_src, NULL);
-
   for (cnt = 0; cnt < 10; cnt++) {
     g_print ("Build pipeline (iteration %d)\n", cnt);
 
-    pipeline = gst_pipeline_new ("test-pipeline");
+    pipeline = create_pipeline (source, capsfilter, &options);
+    bus = gst_element_get_bus (pipeline);
+    g_signal_connect (bus, "message", G_CALLBACK (cb_bus), loop);
+    gst_bus_add_signal_watch (bus);
+    gst_object_unref (bus);
 
-    gst_bin_add_many (GST_BIN (pipeline), source, source_caps_filter, NULL);
-    status = gst_element_link (source, source_caps_filter);
-    if (!status) {
-      g_printerr ("VideoDevice could not be linked.\n");
-      gst_object_unref (pipeline);
-      return -1;
-    }
-    stream = create_video_stream (&stVideoStream, options.no_dma_buf,
-        options.video_rtp_port, options.sender_host);
-    if (!stream) {
-      g_printerr ("VideoStream could not be created.\n");
-      gst_object_unref (pipeline);
-      return -1;
-    }
-    gst_bin_add (GST_BIN (pipeline), stream);
-
-    status = gst_element_link (source_caps_filter, stream);
-    if (!status) {
-      g_printerr ("VideoDevice could not be linked with VideoStream.\n");
-      gst_object_unref (pipeline);
-      return -1;
-    }
     g_print ("Start playing pipeline (iteration %d)\n", cnt);
-    ret = gst_element_set_state (pipeline, GST_STATE_PLAYING);
-    if (ret == GST_STATE_CHANGE_FAILURE) {
-      g_printerr ("Unable to set the pipeline to the playing state.\n");
-      gst_object_unref (pipeline);
-      return -1;
-    }
+    gst_element_set_state (pipeline, GST_STATE_PLAYING);
 
-    sleep (4);
+    /* we need to run a GLib main loop to get the messages */
+    loop = g_main_loop_new (NULL, FALSE);
+    g_main_loop_run (loop);
 
-    g_print ("Stop playing pipeline (iteration %d)\n", cnt);
     gst_element_set_state (pipeline, GST_STATE_NULL);
-
-    gst_element_unlink (source_caps_filter, stream);
-    gst_bin_remove_many (GST_BIN (pipeline), source, source_caps_filter,
-        stream, NULL);
-    destroy_video_stream (&stVideoStream);
-
-    g_print ("Delete pipeline (iteration %d)\n", cnt);
-    gst_object_unref (pipeline);
   }
-
-  gst_object_unref (source);
-  gst_object_unref (source_caps_filter);
 
   return 0;
 }
