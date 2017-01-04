@@ -26,7 +26,7 @@ DEST=192.168.2.221
 
 # H264 encode from the source
 VELEM="v4l2src io-mode=dmabuf"
-VCAPS="video/x-raw,width=1280,height=720,framerate=10/1"
+VCAPS="video/x-raw,width=1280,height=720,framerate=30/1"
 VSOURCE="$VELEM ! $VCAPS"
 VENC="v4l2video2h264enc output-io-mode=dmabuf-import ! video/x-h264,stream-format=byte-stream,aligment=au,profile=constrained-baseline ! rtph264pay config-interval=2"
 
@@ -34,7 +34,7 @@ VRTPSINK="udpsink port=5000 host=$DEST name=vrtpsink"
 VRTCPSINK="udpsink port=5001 host=$DEST sync=false async=false name=vrtcpsink"
 VRTCPSRC="udpsrc port=5005 name=vrtpsrc"
 
-gst-launch-1.0 -v rtpbin name=rtpbin rtp-profile=avpf  \
+gst-launch-1.0 -v rtpbin name=rtpbin                   \
     $VSOURCE ! $VENC ! rtpbin.send_rtp_sink_0          \
         rtpbin.send_rtp_src_0 ! $VRTPSINK              \
         rtpbin.send_rtcp_src_0 ! $VRTCPSINK            \
