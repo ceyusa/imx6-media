@@ -242,6 +242,7 @@ main (int argc, char *argv[])
   gboolean status;
   int cnt;
 
+  g_set_prgname ("sender");
   if (!parse_cmdline (&argc, argv, &options))
     return 1;
 
