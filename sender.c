@@ -8,17 +8,14 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-typedef struct _options_st
+static struct options_st
 {
   gchar *sender_host;
   gint video_rtp_port;
   gint width_video;
   gint height_video;
   gboolean no_dma_buf;
-
-} options_st;
-
-static options_st options = {
+} options = {
   "127.0.0.1",
   9997,
   320,
@@ -26,50 +23,34 @@ static options_st options = {
   FALSE
 };
 
-/* print the stats of a source */
-static void
-print_source_stats (GObject * source)
-{
-  GstStructure *stats;
-  gchar *str;
+typedef struct {
+  GMainLoop *loop;
+  GstElement *pipeline;
+  gboolean halt;
+} App;
 
-  /* get the source stats */
-  g_object_get (source, "stats", &stats, NULL);
-
-  /* simply dump the stats structure */
-  str = gst_structure_to_string (stats);
-  g_print ("source stats: %s\n", str);
-
-  gst_structure_free (stats);
-  g_free (str);
-}
+static guint stats_id = 0;
 
 /* this function is called every second and dumps the RTP manager stats */
 static gboolean
 print_stats (GstElement * rtpbin)
 {
   GObject *session;
-  GValueArray *arr;
-  GValue *val;
-  guint i;
-
-  g_print ("***********************************\n");
+  GstStructure *stats;
+  gchar *str;
 
   /* get session 0 */
   g_signal_emit_by_name (rtpbin, "get-internal-session", 0, &session);
 
-  /* print all the sources in the session, this includes the internal source */
-  g_object_get (session, "sources", &arr, NULL);
+  /* get the source stats */
+  g_object_get (session, "stats", &stats, NULL);
 
-  for (i = 0; i < arr->n_values; i++) {
-    GObject *source;
+  /* simply dump the stats structure */
+  str = gst_structure_to_string (stats);
+  g_print ("session stats: %s\n", str);
 
-    val = g_value_array_get_nth (arr, i);
-    source = g_value_get_object (val);
-
-    print_source_stats (source);
-  }
-  g_value_array_free (arr);
+  gst_structure_free (stats);
+  g_free (str);
 
   g_object_unref (session);
 
@@ -77,7 +58,19 @@ print_stats (GstElement * rtpbin)
 }
 
 static gboolean
-parse_cmdline (int *argc, char **argv, options_st * options)
+stop (gpointer data)
+{
+  App *app;
+
+  app = data;
+  g_print ("Stopping\n");
+  g_main_loop_quit (app->loop);
+
+  return FALSE;
+}
+
+static gboolean
+parse_cmdline (int *argc, char **argv, struct options_st * options)
 {
   GOptionEntry entries[] = {
     {"sender-host", 0, 0, G_OPTION_ARG_STRING, &options->sender_host,
@@ -118,6 +111,50 @@ parse_cmdline (int *argc, char **argv, options_st * options)
   return ret;
 }
 
+static gboolean
+handle_messages (GstBus * bus, GstMessage * message, gpointer data)
+{
+  App *app;
+  GError *err;
+  gchar *debug;
+
+  app = data;
+
+  switch (GST_MESSAGE_TYPE (message)) {
+    case GST_MESSAGE_ERROR:
+      gst_message_parse_error (message, &err, &debug);
+      g_printerr ("Error received from element %s: %s\n",
+          GST_OBJECT_NAME (message->src), err->message);
+      g_printerr ("Debugging information: %s\n", debug ? debug : "none");
+      g_clear_error (&err);
+      g_free (debug);
+      g_main_loop_quit (app->loop);
+      app->halt = TRUE;
+      break;
+    case GST_MESSAGE_EOS:
+      g_print ("EOS\n");
+      g_main_loop_quit (app->loop);
+      break;
+    case GST_MESSAGE_STATE_CHANGED: {
+      GstState old_state, new_state, pending_state;
+
+      gst_message_parse_state_changed (message, &old_state, &new_state,
+           &pending_state);
+      if (GST_MESSAGE_SRC (message) == GST_OBJECT (app->pipeline)) {
+        g_print ("%s\n", gst_element_state_get_name (new_state));
+        if (new_state == GST_STATE_PLAYING) {
+          g_timeout_add_seconds (4, stop, data);
+        }
+      }
+      break;
+    }
+    default:
+      break;
+  }
+
+  return TRUE;
+}
+
 /* build a pipeline equivalent to:
  *
  * gst-launch-1.0 -v rtpbin \
@@ -130,7 +167,7 @@ parse_cmdline (int *argc, char **argv, options_st * options)
  *        udpsrc port=10002 ! rtpbin.recv_rtcp_sink_0
  */
 static GstElement *
-create_pipeline (options_st * options)
+create_pipeline (struct options_st * options)
 {
   GstElement *pipeline, *rtpbin, *source, *srccapsfilter, *payloader, *encoder,
     *capsfilter, *parser, *rtpsink, *rtcpsink, *rtcpsrc;
@@ -144,12 +181,12 @@ create_pipeline (options_st * options)
   if (!options->no_dma_buf)
     g_object_set (source, "io-mode", 4, NULL);
 
-  srcapsfilter = gst_element_factory_make ("capsfilter", NULL);
+  srccapsfilter = gst_element_factory_make ("capsfilter", NULL);
   caps = gst_caps_new_simple ("video/x-raw",
       "framerate", GST_TYPE_FRACTION, 30, 1,
       "format", G_TYPE_STRING, "I420",
-      "width", G_TYPE_INT, options.width_video,
-      "height", G_TYPE_INT, options.height_video,
+      "width", G_TYPE_INT, options->width_video,
+      "height", G_TYPE_INT, options->height_video,
       NULL);
   g_object_set (srccapsfilter, "caps", caps, NULL);
 
@@ -203,11 +240,20 @@ create_pipeline (options_st * options)
   gst_object_unref (srcpad);
   gst_object_unref (sinkpad);
 
-  /* get an RTCP srcpad for sending RTCP to the receiver */
-  srcpad = gst_element_get_static_pad (rtcpsrc, "src");
-  sinkpad = gst_element_get_request_pad (rtpbin, "recv_rtcp_sink_0");
+  /* get the RTP srcpad that was created when we requested the sinkpad
+   * above and link it to the rtpsink sinkpad*/
+  srcpad = gst_element_get_static_pad (rtpbin, "send_rtp_src_0");
+  sinkpad = gst_element_get_static_pad (rtpsink, "sink");
   if (gst_pad_link (srcpad, sinkpad) != GST_PAD_LINK_OK)
-    g_error ("Failed to link rtcpsrc to rtpbin");
+    g_error ("Failed to link rtpbin to rtpsink");
+  gst_object_unref (srcpad);
+  gst_object_unref (sinkpad);
+
+  /* get an RTCP srcpad for sending RTCP to the receiver */
+  srcpad = gst_element_get_request_pad (rtpbin, "send_rtcp_src_0");
+  sinkpad = gst_element_get_static_pad (rtcpsink, "sink");
+  if (gst_pad_link (srcpad, sinkpad) != GST_PAD_LINK_OK)
+    g_error ("Failed to link rtpbin to rtcpsink");
   gst_object_unref (srcpad);
   gst_object_unref (sinkpad);
 
@@ -221,7 +267,7 @@ create_pipeline (options_st * options)
   gst_object_unref (sinkpad);
 
   /* print stats every second */
-  g_timeout_add_seconds (1, (GSourceFunc) print_stats, rtpbin);
+  stats_id = g_timeout_add_seconds (1, (GSourceFunc) print_stats, rtpbin);
 
   return pipeline;
 }
@@ -229,9 +275,8 @@ create_pipeline (options_st * options)
 int
 main (int argc, char *argv[])
 {
-  GstElement *pipeline;
   GstBus *bus;
-  GMainLoop *loop;
+  App app;
   int cnt;
 
   g_set_prgname ("sender");
@@ -243,23 +288,32 @@ main (int argc, char *argv[])
     exit (-1);
   }
 
+  app.halt = FALSE;
   for (cnt = 0; cnt < 10; cnt++) {
     g_print ("Build pipeline (iteration %d)\n", cnt);
 
-    pipeline = create_pipeline (source, capsfilter, &options);
-    bus = gst_element_get_bus (pipeline);
-    g_signal_connect (bus, "message", G_CALLBACK (cb_bus), loop);
-    gst_bus_add_signal_watch (bus);
+    /* we need to run a GLib main loop to get the messages */
+    app.loop = g_main_loop_new (NULL, FALSE);
+
+    /* build pipeline */
+    app.pipeline = create_pipeline (&options);
+    bus = gst_element_get_bus (app.pipeline);
+    gst_bus_add_watch (bus, handle_messages, &app);
     gst_object_unref (bus);
 
-    g_print ("Start playing pipeline (iteration %d)\n", cnt);
-    gst_element_set_state (pipeline, GST_STATE_PLAYING);
+    gst_element_set_state (app.pipeline, GST_STATE_PLAYING);
 
-    /* we need to run a GLib main loop to get the messages */
-    loop = g_main_loop_new (NULL, FALSE);
-    g_main_loop_run (loop);
+    g_main_loop_run (app.loop);
 
-    gst_element_set_state (pipeline, GST_STATE_NULL);
+    gst_element_set_state (app.pipeline, GST_STATE_NULL);
+
+    if (stats_id != 0)
+      g_source_remove (stats_id);
+    gst_object_unref (app.pipeline);
+    g_main_loop_unref (app.loop);
+
+    if (app.halt)
+      break;
   }
 
   return 0;
