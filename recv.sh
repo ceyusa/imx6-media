@@ -31,7 +31,7 @@ VIDEO_SINK="vaapisink"
 # the destination machine to send RTCP to. This is the address of the sender and
 # is used to send back the RTCP reports of this receiver. If the data is sent
 # from another machine, change this address.
-DEST=127.0.0.1
+DEST=192.168.2.220
 
 gst-launch-1.0 -v rtpbin name=rtpbin                                                \
     udpsrc caps=$VIDEO_CAPS port=5000 ! rtpbin.recv_rtp_sink_0                      \

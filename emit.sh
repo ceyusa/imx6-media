@@ -22,13 +22,13 @@
 # receiver in order to transmit the SPS and PPS earlier.
 
 # change this to send the RTP data and RTCP to another host
-DEST=127.0.0.1
+DEST=192.168.2.221
 
 # H264 encode from the source
-VELEM="v4l2src"
+VELEM="v4l2src io-mode=dmabuf"
 VCAPS="video/x-raw,width=1280,height=720,framerate=10/1"
-VSOURCE="$VELEM ! $VCAPS ! vaapipostproc"
-VENC="vaapih264enc ! rtph264pay config-interval=2"
+VSOURCE="$VELEM ! $VCAPS"
+VENC="v4l2video2h264enc output-io-mode=dmabuf-import ! video/x-h264,stream-format=byte-stream,aligment=au,profile=constrained-baseline ! rtph264pay config-interval=2"
 
 VRTPSINK="udpsink port=5000 host=$DEST name=vrtpsink"
 VRTCPSINK="udpsink port=5001 host=$DEST sync=false async=false name=vrtcpsink"
