@@ -15,49 +15,22 @@ static struct options_st
   gint width_video;
   gint height_video;
   gboolean no_dma_buf;
+  gboolean verbose;
 } options = {
-  "127.0.0.1",
-  9997,
-  320,
-  240,
-  FALSE
+  "192.168.2.221",
+  5000,
+  1280,
+  720,
+  FALSE,
+  FALSE,
 };
 
 typedef struct {
   GMainLoop *loop;
   GstElement *pipeline, *rtpbin;
   gboolean halt;
-  guint stats_id;
+  guint logs_id;
 } App;
-
-/* this function is called every second and dumps the RTP manager stats */
-static gboolean
-print_stats (gpointer data)
-{
-  GstElement *rtpbin;
-  GObject *session;
-  GstStructure *stats;
-  gchar *str;
-
-  rtpbin = data;
-
-  /* get session 0 */
-  g_signal_emit_by_name (rtpbin, "get-internal-session", 0, &session);
-
-  /* get the source stats */
-  g_object_get (session, "stats", &stats, NULL);
-
-  /* simply dump the stats structure */
-  str = gst_structure_to_string (stats);
-  g_print ("session stats: %s\n", str);
-
-  gst_structure_free (stats);
-  g_free (str);
-
-  g_object_unref (session);
-
-  return TRUE;
-}
 
 static gboolean
 stop (gpointer data)
@@ -81,16 +54,19 @@ parse_cmdline (int *argc, char **argv, struct options_st * options)
 
     {"rtp-port", 0, 0, G_OPTION_ARG_INT, &options->video_rtp_port,
         "UDP port for RTP video.  Should be even (RTCP will take the next following it)",
-          "9997"},
+          "5000"},
 
     {"video-width", 0, 0, G_OPTION_ARG_INT, &options->width_video,
-        "width of the video to send", "320"},
+        "width of the video to send", "1280"},
 
     {"video-height", 0, 0, G_OPTION_ARG_INT, &options->height_video,
-        "height of the video to send", "240"},
+        "height of the video to send", "720"},
 
     {"no-dma-buf", 0, 0, G_OPTION_ARG_NONE, &options->no_dma_buf,
-        "Disable usage of DMABUF", NULL},
+        "disable usage of DMABUF", NULL},
+
+    {"verbose", 'v', 0, G_OPTION_ARG_NONE, &options->verbose,
+        "verbose console messages", NULL},
 
     {NULL}
   };
@@ -145,8 +121,9 @@ handle_messages (GstBus * bus, GstMessage * message, gpointer data)
       if (GST_MESSAGE_SRC (message) == GST_OBJECT (app->pipeline)) {
         g_print ("%s\n", gst_element_state_get_name (new_state));
         if (new_state == GST_STATE_PLAYING) {
-          /* print stats every second */
-          app->stats_id = g_timeout_add_seconds (1, print_stats, app->rtpbin);
+          /* dump image */
+          GST_DEBUG_BIN_TO_DOT_FILE (GST_BIN (app->pipeline),
+              GST_DEBUG_GRAPH_SHOW_ALL, "running-pipe");
           g_timeout_add_seconds (4, stop, data);
         }
       }
@@ -165,7 +142,7 @@ handle_messages (GstBus * bus, GstMessage * message, gpointer data)
  *    v4l2src io-mode=dmabuf ! video/x-raw, width=320, height=240, format=I420 ! \
  *               v4l2video2h264enc output-io-mode=dmabuf-import ! \
  *               video/x-h264, stream-format=byte-stream, aligment=au, profile=constrained-baseline ! \
- *               h264parse ! rtph264pay ! rtpbin.send_rtp_sink_0               \
+ *               rtph264pay ! rtpbin.send_rtp_sink_0               \
  *           rtpbin.send_rtp_src_0 ! udpsink port=9997 host=127.0.0.1          \
  *           rtpbin.send_rtcp_src_0 ! udpsink port=9998 host=127.0.0.1 sync=false async=false \
  *        udpsrc port=10002 ! rtpbin.recv_rtcp_sink_0
@@ -174,7 +151,7 @@ static GstElement *
 create_pipeline (App * app, struct options_st * options)
 {
   GstElement *pipeline, *rtpbin, *source, *srccapsfilter, *payloader, *encoder,
-    *capsfilter, *parser, *rtpsink, *rtcpsink, *rtcpsrc;
+    *capsfilter, *rtpsink, *rtcpsink, *rtcpsrc;
   GstCaps *caps;
   GstPad *sinkpad, *srcpad;
 
@@ -206,14 +183,14 @@ create_pipeline (App * app, struct options_st * options)
       NULL);
   g_object_set (capsfilter, "caps", caps, NULL);
 
-  parser = gst_element_factory_make ("h264parse", NULL);
   payloader = gst_element_factory_make ("rtph264pay", NULL);
+  g_object_set (payloader, "config-interval", 2, NULL);
 
   gst_bin_add_many (GST_BIN (pipeline), source, srccapsfilter, encoder,
-      capsfilter, parser, payloader, NULL);
+      capsfilter, payloader, NULL);
 
   if (!gst_element_link_many (source, srccapsfilter, encoder, capsfilter,
-           parser, payloader, NULL)) {
+           payloader, NULL)) {
     g_error ("Failed to link source, srccapsfilter, encoder, capsfilter, "
         "parser and payloader");
   }
@@ -227,13 +204,14 @@ create_pipeline (App * app, struct options_st * options)
       "host", options->sender_host, NULL);
 
   rtcpsink = gst_element_factory_make ("udpsink", NULL);
-  g_object_set (rtpsink, "port", options->video_rtp_port + 1,
+  g_object_set (rtcpsink, "port", options->video_rtp_port + 1,
       "host", options->sender_host, "async", FALSE, "sync", FALSE, NULL);
 
   rtcpsrc = gst_element_factory_make ("udpsrc", NULL);
   g_object_set (rtcpsrc, "port", options->video_rtp_port + 5, NULL);
 
-  gst_bin_add_many (GST_BIN (pipeline), rtpsink, rtcpsink, rtcpsrc, NULL);
+  gst_bin_add_many (GST_BIN (pipeline), rtpsink, rtcpsink, rtcpsrc,
+      NULL);
 
   /* now link all to the rtpbin, start by getting an RTP sinkpad for
    * session 0 */
@@ -270,6 +248,11 @@ create_pipeline (App * app, struct options_st * options)
   gst_object_unref (srcpad);
   gst_object_unref (sinkpad);
 
+  if (options->verbose) {
+    app->logs_id = g_signal_connect (pipeline, "deep-notify",
+        G_CALLBACK (gst_object_default_deep_notify), NULL);
+  }
+
   app->pipeline = pipeline;
   app->rtpbin = rtpbin;
 
@@ -304,10 +287,6 @@ main (int argc, char *argv[])
     g_main_loop_run (app.loop);
     gst_element_set_state (app.pipeline, GST_STATE_NULL);
 
-    if (app.stats_id != 0) {
-      g_source_remove (app.stats_id);
-      app.stats_id = 0;
-    }
     gst_object_unref (app.pipeline);
     g_main_loop_unref (app.loop);
 
