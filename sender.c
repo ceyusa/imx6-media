@@ -1,5 +1,5 @@
 /*
- * gst-rtpbin-stream-sender-loop.c
+ * sender.c
  *
  *  quick'n'dirty test application for creating/destroying video stream on i.MX6
  *  in loop/multiple iterations

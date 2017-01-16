@@ -1,3 +1,5 @@
+# PATH=/opt/bytech/src/by-buildroot/output/host/usr/bin/:$PATH make
+
 CC = arm-linux-gcc
 
 CFLAGS := -O0 -ggdb -Wall -Wextra -Wno-unused-parameter
