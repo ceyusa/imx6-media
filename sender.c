@@ -45,6 +45,18 @@ stop (gpointer data)
 }
 
 static gboolean
+eos (gpointer data)
+{
+  App *app;
+
+  app = data;
+  if (!gst_element_send_event (app->pipeline, gst_event_new_eos()))
+    g_warning ("failed to send EOS event");
+
+  return FALSE;
+}
+
+static gboolean
 parse_cmdline (int *argc, char **argv, struct options_st * options)
 {
   GOptionEntry entries[] = {
@@ -106,12 +118,12 @@ handle_messages (GstBus * bus, GstMessage * message, gpointer data)
       g_printerr ("Debugging information: %s\n", debug ? debug : "none");
       g_clear_error (&err);
       g_free (debug);
-      g_main_loop_quit (app->loop);
+      g_idle_add (stop, data);
       app->halt = TRUE;
       break;
     case GST_MESSAGE_EOS:
       g_print ("EOS\n");
-      g_main_loop_quit (app->loop);
+      g_idle_add (stop, data);
       break;
     case GST_MESSAGE_STATE_CHANGED: {
       GstState old_state, new_state, pending_state;
@@ -124,7 +136,7 @@ handle_messages (GstBus * bus, GstMessage * message, gpointer data)
           /* dump image */
           GST_DEBUG_BIN_TO_DOT_FILE (GST_BIN (app->pipeline),
               GST_DEBUG_GRAPH_SHOW_ALL, "running-pipe");
-          g_timeout_add_seconds (4, stop, data);
+          g_timeout_add_seconds (5, eos, data);
         }
       }
       break;
