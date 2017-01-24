@@ -17,6 +17,12 @@ send: override CFLAGS += $(SEND_CFLAGS)
 send: override LIBS += $(SEND_LIBS)
 bins += send
 
+test1: test-1.o
+test1: override CFLAGS += $(SEND_CFLAGS)
+test1: override LIBS += $(SEND_LIBS)
+bins += test1
+
+
 all: $(bins)
 
 %.o:: %.c
